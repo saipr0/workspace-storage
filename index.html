@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="workspace-storage is a personal application connecting a privately operated server to encrypted files in Google Drive through rclone.">
+  <title>workspace-storage — Personal file storage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="brand" href="./">workspace-storage</a><nav aria-label="Main navigation"><a href="privacy.html">Privacy</a><a href="#contact">Contact</a></nav></header>
+  <main>
+    <p class="eyebrow">Personal storage · Operated by saipr0</p>
+    <h1>A private home<br>for personal files.</h1>
+    <p class="intro">workspace-storage connects the owner's personal server to Google Drive using rclone, with encryption applied before file contents are uploaded.</p>
+    <section>
+      <h2>What the application does</h2>
+      <p>This personal application creates and manages an encrypted workspace in the owner's Google Drive. It supports uploading, listing, downloading, renaming and deleting files through rclone. Nextcloud is the intended browsing interface; integration with local and remote storage is being developed.</p>
+      <p>This website provides application information. It does not provide account registration, a file browser or a Google sign-in form.</p>
+    </section>
+    <section>
+      <h2>Google Drive access</h2>
+      <p>The application requests <code>https://www.googleapis.com/auth/drive.file</code> so it can manage files created by or explicitly authorized for this application. Google authorization is completed using rclone on the owner's devices.</p>
+      <p>Rclone's crypt feature encrypts file contents, filenames and subfolder names before storage in Drive. The enclosing workspace folder name and some storage metadata remain visible to Google.</p>
+      <p>Read the <a href="privacy.html">Privacy Policy</a> for details about access, storage and deletion.</p>
+    </section>
+    <section id="terms">
+      <h2>Terms of use</h2>
+      <p>This is a personal-use integration operated by the GitHub account <a href="https://github.com/saipr0">saipr0</a>. It is not offered as a public storage service. The owner is responsible for the files they store, keeping encryption credentials secure and maintaining recoverable backups. The integration is provided as-is, without an availability or recovery guarantee.</p>
+    </section>
+    <section id="contact">
+      <h2>Contact</h2>
+      <p>For questions about this application or its handling of data, contact the operator through the <a href="https://github.com/saipr0/workspace-storage/issues">workspace-storage GitHub issues page</a>. Issues are public: do not include private files, passwords or authorization tokens.</p>
+    </section>
+  </main>
+  <footer><span>workspace-storage · Personal use</span><nav aria-label="Footer navigation"><a href="privacy.html">Privacy Policy</a><a href="#terms">Terms of use</a></nav></footer>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Privacy Policy for workspace-storage, a personal Google Drive and rclone integration operated by saipr0.">
+  <title>Privacy Policy — workspace-storage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="brand" href="./">workspace-storage</a><nav aria-label="Main navigation"><a href="./">Home</a><a href="#contact">Contact</a></nav></header>
+  <main class="policy">
+    <p class="eyebrow">Effective October 4, 2026</p>
+    <h1>Privacy Policy</h1>
+    <p class="intro">workspace-storage is a personal file-storage integration operated by the owner of the GitHub account saipr0.</p>
+    <section>
+      <h2>Data accessed and why</h2>
+      <p>The application uses Google Drive's <code>drive.file</code> permission to create and manage files and folders created by or explicitly authorized for the application. It processes file contents and associated metadata, including names, sizes, identifiers and modification times, to perform the owner's requested storage operations.</p>
+      <p>Google OAuth access and refresh tokens allow rclone to access the authorized Drive account without asking for the account password. The application does not request access to Gmail or Google Contacts.</p>
+    </section>
+    <section>
+      <h2>Storage and protection</h2>
+      <p>Rclone's crypt feature encrypts file contents, filenames and subfolder names on the owner's device before uploading them to Google Drive. The enclosing workspace folder name, encrypted object sizes and some other metadata are not hidden from Google.</p>
+      <p>Decrypted files may be stored or cached on the owner's server or other devices when used. Rclone configuration, OAuth tokens and encryption settings are stored on devices configured by the owner. Rclone's default password obfuscation in its configuration is not strong encryption; access to that configuration must be protected.</p>
+      <p>Operational logs may contain file paths, timestamps and error details. Configuration, credentials and private file contents are not intended for publication in this website or its repository.</p>
+    </section>
+    <section>
+      <h2>Use and sharing</h2>
+      <p>Google user data is used only to provide the requested personal file-storage functionality. The application does not sell this data, use it for advertising, or use it to train artificial intelligence models. Google Drive processes and stores the uploaded encrypted data as the storage provider.</p>
+      <p>The owner may separately choose to share files through their storage tools. Such sharing is controlled by the owner.</p>
+      <p>workspace-storage's use and transfer of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including its Limited Use requirements.</p>
+    </section>
+    <section>
+      <h2>Retention, deletion and revocation</h2>
+      <p>Files remain in the configured storage until the owner deletes them. Local copies, caches, Drive trash, file revisions and independently configured backups may retain data until separately removed or expired under their retention settings.</p>
+      <p>The owner can revoke the application's Google access in <a href="https://myaccount.google.com/connections">Google Account connections</a>. Revocation stops future authorized access but does not itself delete existing files or local copies. The owner can remove stored credentials from their devices and delete cloud files separately.</p>
+    </section>
+    <section>
+      <h2>This public website</h2>
+      <p>These informational pages contain no analytics scripts, advertising, forms or application cookies. GitHub Pages hosts this site and may process technical request information, such as IP addresses, under <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub's Privacy Statement</a>.</p>
+    </section>
+    <section id="contact">
+      <h2>Questions and updates</h2>
+      <p>Contact the operator through <a href="https://github.com/saipr0/workspace-storage/issues">workspace-storage GitHub issues</a>. Issues are public; do not submit private files or credentials. Material changes to this policy will be reflected on this page with an updated effective date.</p>
+    </section>
+  </main>
+  <footer><span>workspace-storage · Personal use</span><nav aria-label="Footer navigation"><a href="./">Home</a><a href="./#terms">Terms of use</a></nav></footer>
+</body>
+</html>
