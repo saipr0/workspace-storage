@@ -1,0 +1,1235 @@
+diff --git a/vfs/dir.go b/vfs/dir.go
+index 0d24195..6ea98ad 100644
+--- a/vfs/dir.go
++++ b/vfs/dir.go
+@@ -1111,6 +1111,12 @@ func (d *Dir) Remove() error {
+ 		fs.Errorf(d, "Dir.Remove failed to remove directory: %v", err)
+ 		return err
+ 	}
++	if d.vfs.cache != nil {
++		if err := d.vfs.cache.WorkspaceDelete(d.path); err != nil {
++			return err
++		}
++	}
++
+ 	// Remove the item from the parent directory listing
+ 	if d.parent != nil {
+ 		d.parent.delObject(d.Name())
+@@ -1178,6 +1184,12 @@ func (d *Dir) Rename(oldName, newName string, destDir *Dir) error {
+ 		fs.Errorf(oldPath, "Dir.Rename error: %v", err)
+ 		return err
+ 	}
++	if d.vfs.cache != nil {
++		if err := d.vfs.cache.WorkspacePrepareRename(oldPath, newPath); err != nil {
++			return err
++		}
++	}
++
+ 	switch x := oldNode.DirEntry().(type) {
+ 	case nil:
+ 		if oldFile, ok := oldNode.(*File); ok {
+@@ -1228,6 +1240,12 @@ func (d *Dir) Rename(oldName, newName string, destDir *Dir) error {
+ 		return err
+ 	}
+ 
++	if d.vfs.cache != nil {
++		if err := d.vfs.cache.WorkspaceRename(oldPath, newPath); err != nil {
++			return err
++		}
++	}
++
+ 	// Show moved - delete from old dir and add to new
+ 	d.delObject(oldName)
+ 	destDir.addObject(oldNode)
+diff --git a/vfs/file.go b/vfs/file.go
+index 69a7afc..b44993a 100644
+--- a/vfs/file.go
++++ b/vfs/file.go
+@@ -691,6 +691,11 @@ func (f *File) Remove() (err error) {
+ 	// Remove the item from the directory listing
+ 	// called with File.mu released when there is no error removing the underlying file
+ 	if err == nil {
++		if d.vfs.cache != nil {
++			if policyErr := d.vfs.cache.WorkspaceDelete(f.Path()); policyErr != nil {
++				return policyErr
++			}
++		}
+ 		d.delObject(f.Name())
+ 	}
+ 	return err
+diff --git a/vfs/vfs.go b/vfs/vfs.go
+index 79c352a..24af1ac 100644
+--- a/vfs/vfs.go
++++ b/vfs/vfs.go
+@@ -178,6 +178,7 @@ var (
+ 
+ // VFS represents the top level filing system
+ type VFS struct {
++	workspace   *workspaceController
+ 	f           fs.Fs
+ 	ctx         context.Context
+ 	root        *Dir
+@@ -378,6 +379,7 @@ func (vfs *VFS) SetCacheMode(cacheMode vfscommon.CacheMode) {
+ 		vfs.Opt.CacheMode = cacheMode
+ 		vfs.cancelCache = cancel
+ 		vfs.cache = cache
++		vfs.startWorkspace(ctx)
+ 	}
+ }
+ 
+@@ -385,6 +387,9 @@ func (vfs *VFS) SetCacheMode(cacheMode vfscommon.CacheMode) {
+ func (vfs *VFS) shutdownCache() {
+ 	if vfs.cancelCache != nil {
+ 		vfs.cancelCache()
++		if vfs.workspace != nil {
++			<-vfs.workspace.done
++		}
+ 		vfs.cancelCache = nil
+ 	}
+ }
+diff --git a/vfs/vfscache/cache.go b/vfs/vfscache/cache.go
+index eaa17b8..634c6b1 100644
+--- a/vfs/vfscache/cache.go
++++ b/vfs/vfscache/cache.go
+@@ -40,6 +40,7 @@ import (
+ 
+ // Cache opened files
+ type Cache struct {
++	workspace workspacePolicy
+ 	// read only - no locking needed to read these
+ 	ctx        context.Context      // context for cache lifetime
+ 	fremote    fs.Fs                // fs for the remote we are caching
+@@ -132,6 +133,10 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
+ 		avFn:       avFn,
+ 	}
+ 
++	if err := c.loadWorkspace(); err != nil {
++		return nil, err
++	}
++
+ 	// load in the cache and metadata off disk
+ 	err = c.reload(ctx)
+ 	if err != nil {
+@@ -736,10 +741,10 @@ func (c *Cache) minFreeSpaceQuotaOK() bool {
+ //
+ // must be called with mu held.
+ func (c *Cache) maxSizeQuotaOK() bool {
+-	if c.opt.CacheMaxSize <= 0 {
++	if c.workspaceLimit() <= 0 {
+ 		return true
+ 	}
+-	return c.used <= int64(c.opt.CacheMaxSize)
++	return c.used <= c.workspaceLimit()
+ }
+ 
+ // Check the available quotas for a disk is in limits.
+@@ -751,7 +756,7 @@ func (c *Cache) quotasOK() bool {
+ 
+ // Return true if any quotas set
+ func (c *Cache) haveQuotas() bool {
+-	return c.opt.CacheMaxSize > 0 || c.opt.CacheMinFreeSpace > 0
++	return c.workspaceLimit() > 0 || c.opt.CacheMinFreeSpace > 0
+ }
+ 
+ // Remove clean cache files that are not open until the total space
+diff --git a/vfs/vfscache/item.go b/vfs/vfscache/item.go
+index 475f975..f063394 100644
+--- a/vfs/vfscache/item.go
++++ b/vfs/vfscache/item.go
+@@ -1008,7 +1008,7 @@ func (item *Item) RemoveNotInUse(maxAge time.Duration, emptyOnly bool) (removed
+ 	spaceFreed = 0
+ 	removed = false
+ 
+-	if item.opens != 0 || item.info.Dirty || item.graceTimer != nil {
++	if item.opens != 0 || item.info.Dirty || item.graceTimer != nil || item.c.workspaceProtected(item.name) {
+ 		return
+ 	}
+ 
+@@ -1043,6 +1043,10 @@ func (item *Item) Reset() (rr ResetResult, spaceFreed int64, err error) {
+ 	item.mu.Lock()
+ 	defer item.mu.Unlock()
+ 
++	if item.c.workspaceProtected(item.name) {
++		return SkippedPendingAccess, 0, nil
++	}
++
+ 	// The item is not being used now.  Just remove it instead of resetting it.
+ 	// Items in their grace period are treated as in-use; the cache
+ 	// cleaner will pick them up on the next pass.
+diff --git a/vfs/vfscache/workspace.go b/vfs/vfscache/workspace.go
+new file mode 100644
+index 0000000..efd8258
+--- /dev/null
++++ b/vfs/vfscache/workspace.go
+@@ -0,0 +1,437 @@
++package vfscache
++
++// Workspace policy lives outside the expendable VFS metadata tree. Lock order:
++// Cache.mu -> Item.mu -> workspaceMu. Never acquire a cache/item lock while
++// holding workspaceMu. A failed state write rolls back the in-memory change.
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path"
++	"path/filepath"
++	"strings"
++	"sync"
++
++	"github.com/rclone/rclone/lib/diskusage"
++)
++
++type WorkspaceState struct {
++	Version int               `json:"version"`
++	Budget  int64             `json:"budget"`
++	Pins    map[string]bool   `json:"pins"`
++	Jobs    map[string]string `json:"jobs"`
++	Moves   map[string]string `json:"moves,omitempty"`
++}
++
++type WorkspaceFile struct {
++	Complete bool  `json:"complete"`
++	Cached   int64 `json:"cached"`
++	Size     int64 `json:"size"`
++	Dirty    bool  `json:"dirty"`
++	Busy     bool  `json:"busy"`
++	Pinned   bool  `json:"pinned"`
++}
++
++type workspacePolicy struct {
++	mu     sync.Mutex
++	state  WorkspaceState
++	leases map[string]int
++	file   string
++}
++
++func WorkspacePath(name string) (string, error) {
++	if strings.ContainsAny(name, "\\\x00") || strings.HasPrefix(name, "/") {
++		return "", errors.New("workspace paths must be relative")
++	}
++	for _, part := range strings.Split(name, "/") {
++		if part == ".." {
++			return "", errors.New("parent traversal is forbidden")
++		}
++	}
++	name = path.Clean(name)
++	if name == "." {
++		name = ""
++	}
++	return name, nil
++}
++
++func (c *Cache) loadWorkspace() error {
++	c.workspace.file = c.metaRoot + ".workspace.json"
++	c.workspace.leases = make(map[string]int)
++	c.workspace.state = WorkspaceState{Version: 1, Budget: 0, Pins: map[string]bool{}, Jobs: map[string]string{}}
++	b, err := os.ReadFile(c.workspace.file)
++	if errors.Is(err, os.ErrNotExist) {
++		return nil
++	}
++	if err != nil {
++		return err
++	}
++	if err = json.Unmarshal(b, &c.workspace.state); err != nil {
++		return fmt.Errorf("invalid workspace state: %w", err)
++	}
++	if c.workspace.state.Version != 1 || c.workspace.state.Pins == nil || c.workspace.state.Jobs == nil {
++		return errors.New("unsupported workspace state")
++	}
++	return nil
++}
++
++func cloneWorkspace(s WorkspaceState) WorkspaceState {
++	n := s
++	n.Pins = make(map[string]bool, len(s.Pins))
++	n.Jobs = make(map[string]string, len(s.Jobs))
++	n.Moves = make(map[string]string, len(s.Moves))
++	for k, v := range s.Moves {
++		n.Moves[k] = v
++	}
++	for k, v := range s.Pins {
++		n.Pins[k] = v
++	}
++	for k, v := range s.Jobs {
++		n.Jobs[k] = v
++	}
++	return n
++}
++
++func (c *Cache) WorkspaceState() WorkspaceState {
++	c.workspace.mu.Lock()
++	defer c.workspace.mu.Unlock()
++	state := cloneWorkspace(c.workspace.state)
++	if state.Budget == 0 {
++		state.Budget = int64(c.opt.CacheMaxSize)
++	}
++	return state
++}
++
++func (c *Cache) changeWorkspace(fn func(*WorkspaceState)) error {
++	c.workspace.mu.Lock()
++	defer c.workspace.mu.Unlock()
++	next := cloneWorkspace(c.workspace.state)
++	fn(&next)
++	b, err := json.Marshal(next)
++	if err != nil {
++		return err
++	}
++	f, err := os.CreateTemp(filepath.Dir(c.workspace.file), ".workspace-*")
++	if err != nil {
++		return err
++	}
++	name := f.Name()
++	defer os.Remove(name)
++	if _, err = f.Write(b); err == nil {
++		err = f.Sync()
++	}
++	closeErr := f.Close()
++	if err != nil {
++		return err
++	}
++	if closeErr != nil {
++		return closeErr
++	}
++	if err = os.Rename(name, c.workspace.file); err != nil {
++		return err
++	}
++	// The rename has committed. Keep memory consistent even if directory fsync fails.
++	c.workspace.state = next
++	dir, err := os.Open(filepath.Dir(c.workspace.file))
++	if err != nil {
++		return err
++	}
++	defer dir.Close()
++	return dir.Sync()
++}
++
++func (c *Cache) WorkspaceRequest(name, action string) error {
++	var err error
++	if name, err = WorkspacePath(name); err != nil {
++		return err
++	}
++	return c.changeWorkspace(func(s *WorkspaceState) {
++		switch action {
++		case "pin":
++			s.Pins[name] = true
++			s.Jobs[name] = "warm"
++		case "cold":
++			s.Pins[name] = false
++			s.Jobs[name] = "cold"
++		case "warm":
++			s.Jobs[name] = "warm"
++		case "auto":
++			s.Pins[name] = false
++			delete(s.Jobs, name)
++		case "inherit":
++			delete(s.Pins, name)
++			delete(s.Jobs, name)
++		case "cancel":
++			s.Pins[name] = false
++			delete(s.Jobs, name)
++		}
++	})
++}
++
++func (c *Cache) WorkspaceFinish(name, action string) error {
++	return c.changeWorkspace(func(s *WorkspaceState) {
++		if s.Jobs[name] == action {
++			delete(s.Jobs, name)
++		}
++	})
++}
++
++func (c *Cache) WorkspaceBudget(budget int64) error {
++	if budget <= 0 {
++		return errors.New("budget must be positive")
++	}
++	return c.changeWorkspace(func(s *WorkspaceState) { s.Budget = budget })
++}
++
++func (c *Cache) workspaceLimit() int64 {
++	c.workspace.mu.Lock()
++	defer c.workspace.mu.Unlock()
++	if c.workspace.state.Budget == 0 {
++		return int64(c.opt.CacheMaxSize)
++	}
++	return c.workspace.state.Budget
++}
++
++func pinned(s WorkspaceState, name string) bool {
++	for {
++		if v, found := s.Pins[name]; found {
++			return v
++		}
++		if name == "" {
++			return false
++		}
++		name = path.Dir(name)
++		if name == "." {
++			name = ""
++		}
++	}
++}
++
++func (c *Cache) WorkspacePinned(name string) bool {
++	c.workspace.mu.Lock()
++	defer c.workspace.mu.Unlock()
++	return protectedPin(c.workspace.state, name)
++}
++
++func (c *Cache) workspaceProtected(name string) bool {
++	c.workspace.mu.Lock()
++	defer c.workspace.mu.Unlock()
++	return protectedPin(c.workspace.state, name) || c.workspace.leases[name] > 0
++}
++
++// A lease prevents the cleaner from discarding chunks while a whole-file warm
++// is in progress. It is not a pin and does not survive process termination.
++func (c *Cache) WorkspaceLease(name string) func() {
++	c.workspace.mu.Lock()
++	c.workspace.leases[name]++
++	c.workspace.mu.Unlock()
++	return func() { c.workspace.mu.Lock(); c.workspace.leases[name]--; c.workspace.mu.Unlock() }
++}
++
++func (c *Cache) WorkspaceStatus(name string) WorkspaceFile {
++	s := WorkspaceFile{Pinned: c.WorkspacePinned(name)}
++	c.mu.Lock()
++	item := c.item[name]
++	c.mu.Unlock()
++	if item == nil {
++		return s
++	}
++	item.mu.Lock()
++	defer item.mu.Unlock()
++	s.Size = item.info.Size
++	s.Cached = item.info.Rs.Size()
++	s.Complete = item._exists() && item._present()
++	s.Dirty = item.info.Dirty
++	s.Busy = item.opens != 0 || item.graceTimer != nil
++	return s
++}
++
++func (c *Cache) WorkspaceEvict(name string) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	item := c.item[name]
++	if item == nil {
++		return nil
++	}
++	item.mu.Lock()
++	defer item.mu.Unlock()
++	if c.workspaceProtected(name) {
++		return errors.New("file is pinned or downloading")
++	}
++	if item.info.Dirty {
++		return errors.New("waiting for cloud upload")
++	}
++	if item.opens != 0 || item.graceTimer != nil {
++		return errors.New("waiting for file to close")
++	}
++	item._removeFile("workspace make cold")
++	if item._exists() {
++		return errors.New("could not remove local cache file")
++	}
++	item._removeMeta("workspace make cold")
++	item.info.clean()
++	delete(c.item, name)
++	return nil
++}
++
++// Reserve room for a whole-file download, reclaiming only clean unprotected
++// cache entries. Uploads retain rclone's existing soft-limit semantics.
++func (c *Cache) WorkspaceAdmit(name string, size int64) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	var used, missing int64
++	missing = size
++	for key, item := range c.item {
++		item.mu.Lock()
++		cached := item.info.Rs.Size()
++		item.mu.Unlock()
++		used += cached
++		if key == name {
++			missing -= cached
++		}
++	}
++	if missing < 0 {
++		missing = 0
++	}
++	limit := c.workspaceLimit()
++	if limit > 0 && used+missing > limit {
++		for key, item := range c.item {
++			if key == name {
++				continue
++			}
++			removed, freed := item.RemoveNotInUse(0, false)
++			if removed {
++				delete(c.item, key)
++				used -= freed
++			}
++			if used+missing <= limit {
++				break
++			}
++		}
++		if used+missing > limit {
++			return errors.New("local budget is occupied; unpin files or increase the budget")
++		}
++	}
++	du, err := diskusage.New(c.root)
++	if err == nil && int64(du.Available)-missing < int64(c.opt.CacheMinFreeSpace) {
++		return errors.New("insufficient disk space after the free-space reserve")
++	}
++	if err != nil && err != diskusage.ErrUnsupported {
++		return err
++	}
++	return nil
++}
++
++func within(name, parent string) bool {
++	return name == parent || parent == "" || strings.HasPrefix(name, parent+"/")
++}
++
++// Called after VFS mutations, including writes from native clients. Policy is
++// keyed to the VFS namespace, never to browser-supplied filesystem paths.
++func (c *Cache) WorkspaceRename(oldName, newName string) error {
++	if oldName == newName {
++		return c.WorkspaceAbortRename(oldName)
++	}
++	return c.changeWorkspace(func(s *WorkspaceState) {
++		delete(s.Moves, oldName)
++		for k := range s.Pins {
++			if within(k, newName) {
++				delete(s.Pins, k)
++			}
++		}
++		for k := range s.Jobs {
++			if within(k, newName) {
++				delete(s.Jobs, k)
++			}
++		}
++		for k, v := range cloneWorkspace(*s).Pins {
++			if within(k, oldName) {
++				delete(s.Pins, k)
++				s.Pins[newName+strings.TrimPrefix(k, oldName)] = v
++			}
++		}
++		for k, v := range cloneWorkspace(*s).Jobs {
++			if within(k, oldName) {
++				delete(s.Jobs, k)
++				s.Jobs[newName+strings.TrimPrefix(k, oldName)] = v
++			}
++		}
++	})
++}
++
++func (c *Cache) WorkspaceDelete(name string) error {
++	return c.changeWorkspace(func(s *WorkspaceState) {
++		for k := range s.Pins {
++			if within(k, name) {
++				delete(s.Pins, k)
++			}
++		}
++		for k := range s.Jobs {
++			if within(k, name) {
++				delete(s.Jobs, k)
++			}
++		}
++	})
++}
++
++func (c *Cache) WorkspaceUploadState(name string) (uploading bool, retries int) {
++	for _, entry := range c.writeback.Queue() {
++		if within(entry.Name, name) {
++			uploading = uploading || entry.Uploading
++			if !entry.Uploading && entry.Tries > retries {
++				retries = entry.Tries
++			}
++		}
++	}
++	return
++}
++
++// WorkspacePendingUploads includes open writes not yet in the writeback queue.
++func (c *Cache) WorkspacePendingUploads() []string {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	names := []string{}
++	for name, item := range c.item {
++		item.mu.Lock()
++		if item.info.Dirty {
++			names = append(names, name)
++		}
++		item.mu.Unlock()
++	}
++	return names
++}
++
++// WorkspaceCancelDownloads persists a batch without changing upload state.
++func (c *Cache) WorkspaceCancelDownloads(names []string) error {
++	return c.changeWorkspace(func(s *WorkspaceState) {
++		for _, name := range names {
++			s.Pins[name] = false
++			delete(s.Jobs, name)
++		}
++	})
++}
++
++// Preserve protection at both names until a filesystem rename is committed.
++func protectedPin(s WorkspaceState, name string) bool {
++	if pinned(s, name) {
++		return true
++	}
++	for old, next := range s.Moves {
++		if within(name, next) && pinned(s, old+strings.TrimPrefix(name, next)) {
++			return true
++		}
++	}
++	return false
++}
++
++func (c *Cache) WorkspacePrepareRename(old, next string) error {
++	if old == next {
++		return nil
++	}
++	return c.changeWorkspace(func(s *WorkspaceState) { s.Moves[old] = next })
++}
++
++func (c *Cache) WorkspaceAbortRename(old string) error {
++	return c.changeWorkspace(func(s *WorkspaceState) { delete(s.Moves, old) })
++}
+diff --git a/vfs/vfscache/workspace_test.go b/vfs/vfscache/workspace_test.go
+new file mode 100644
+index 0000000..6445f30
+--- /dev/null
++++ b/vfs/vfscache/workspace_test.go
+@@ -0,0 +1,103 @@
++package vfscache
++
++import (
++	"os"
++	"testing"
++
++	"github.com/rclone/rclone/fs/config"
++	"github.com/rclone/rclone/lib/ranges"
++	"github.com/stretchr/testify/require"
++)
++
++func TestWorkspacePinSurvivesReloadAndPressure(t *testing.T) {
++	old := config.GetCacheDir()
++	config.SetCacheDir(t.TempDir())
++	t.Cleanup(func() { config.SetCacheDir(old) })
++	_, c := newTestCache(t)
++	t.Cleanup(func() { _ = os.Remove(c.workspace.file) })
++	item := c.Item("photos/trip.jpg")
++	itemWrite(t, item, "content")
++	require.NoError(t, c.WorkspaceRequest("photos", "pin"))
++	// A clean, closed file must remain protected in both cleaner paths.
++	item.mu.Lock()
++	item.info.Dirty = false
++	item.opens = 0
++	item.mu.Unlock()
++	require.NoError(t, c.loadWorkspace())
++	removed, _ := item.RemoveNotInUse(0, false)
++	require.False(t, removed)
++	_, freed, err := item.Reset()
++	require.NoError(t, err)
++	require.Zero(t, freed)
++	require.True(t, c.WorkspacePinned("photos/new.jpg"))
++	require.Error(t, c.WorkspaceEvict("photos/trip.jpg"))
++	// Child policy overrides the parent without changing siblings.
++	require.NoError(t, c.WorkspaceRequest("photos/trip.jpg", "auto"))
++	require.False(t, c.WorkspacePinned("photos/trip.jpg"))
++	require.True(t, c.WorkspacePinned("photos/new.jpg"))
++	item.mu.Lock()
++	_ = item.fd.Close()
++	item.fd = nil
++	item.mu.Unlock()
++	require.NoError(t, c.WorkspaceEvict("photos/trip.jpg"))
++}
++
++func TestWorkspacePartialAndDirtyAreDistinct(t *testing.T) {
++	old := config.GetCacheDir()
++	config.SetCacheDir(t.TempDir())
++	t.Cleanup(func() { config.SetCacheDir(old) })
++	_, c := newTestCache(t)
++	t.Cleanup(func() { _ = os.Remove(c.workspace.file) })
++	i := c.Item("data")
++	itemWrite(t, i, "abc")
++	i.mu.Lock()
++	i.info.Size = 9
++	i.info.Rs = ranges.Ranges{{Pos: 0, Size: 3}}
++	i.mu.Unlock()
++	s := c.WorkspaceStatus("data")
++	require.False(t, s.Complete)
++	require.True(t, s.Dirty)
++	require.EqualValues(t, 3, s.Cached)
++	require.Error(t, c.WorkspaceEvict("data"))
++	_, freed, err := i.Reset()
++	require.NoError(t, err)
++	require.Zero(t, freed)
++	require.NoError(t, c.WorkspaceBudget(2))
++	require.Error(t, c.WorkspaceAdmit("another", 3))
++	i.mu.Lock()
++	_ = i.fd.Close()
++	i.fd = nil
++	i.opens = 0
++	i.mu.Unlock()
++}
++
++func TestWorkspaceDurableJobsAndRenames(t *testing.T) {
++	old := config.GetCacheDir()
++	config.SetCacheDir(t.TempDir())
++	t.Cleanup(func() { config.SetCacheDir(old) })
++	_, c := newTestCache(t)
++	t.Cleanup(func() { _ = os.Remove(c.workspace.file) })
++	require.NoError(t, c.WorkspaceRequest("A", "pin"))
++	require.NoError(t, c.WorkspaceRequest("A/skip", "auto"))
++	require.NoError(t, c.WorkspaceRequest("A/file", "warm"))
++	require.NoError(t, c.WorkspacePrepareRename("A", "B"))
++	require.NoError(t, c.loadWorkspace())
++	require.True(t, c.WorkspacePinned("A/file"))
++	require.True(t, c.WorkspacePinned("B/file"))
++	require.NoError(t, c.WorkspaceRename("A", "B"))
++	require.NoError(t, c.loadWorkspace())
++	require.True(t, c.WorkspacePinned("B/new"))
++	require.False(t, c.WorkspacePinned("B/skip/file"))
++	require.False(t, c.WorkspacePinned("A/file"))
++	require.Equal(t, "warm", c.WorkspaceState().Jobs["B/file"])
++	require.NoError(t, c.WorkspaceRequest("B/file", "cancel"))
++	require.NoError(t, c.WorkspaceDelete("B"))
++	require.Empty(t, c.WorkspaceState().Jobs)
++	require.Empty(t, c.WorkspaceState().Pins)
++	for _, name := range []string{"../escape", "a/../b", "/absolute", "a\\b"} {
++		require.Error(t, c.WorkspaceRequest(name, "pin"))
++	}
++	// Corrupt policy must never silently turn pinned data into evictable data.
++	require.NoError(t, os.WriteFile(c.workspace.file, []byte("bad"), 0600))
++	require.Error(t, c.loadWorkspace())
++}
+diff --git a/vfs/workspace.go b/vfs/workspace.go
+new file mode 100644
+index 0000000..299860d
+--- /dev/null
++++ b/vfs/workspace.go
+@@ -0,0 +1,404 @@
++package vfs
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"sort"
++	"sync"
++	"time"
++
++	"github.com/rclone/rclone/fs/rc"
++	"github.com/rclone/rclone/vfs/vfscache"
++)
++
++// One worker owns whole-file hydration. Requests persist before acknowledgement;
++// pins are desired state and are reconciled after restart and for new children.
++type workspaceController struct {
++	vfs      *VFS
++	cache    *vfscache.Cache
++	mu       sync.Mutex
++	active   string
++	current  string
++	revision uint64
++	cancel   context.CancelFunc
++	errors   map[string]string
++	wake     chan struct{}
++	done     chan struct{}
++}
++
++func (vfs *VFS) startWorkspace(ctx context.Context) {
++	w := &workspaceController{vfs: vfs, cache: vfs.cache, errors: map[string]string{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
++	vfs.workspace = w
++	go w.run(ctx)
++}
++
++func init() {
++	rc.Add(rc.Call{Path: "workspace/control", Fn: workspaceControl,
++		Title: "Manage persistent workspace pins and local availability."})
++}
++
++func workspaceControl(ctx context.Context, in rc.Params) (rc.Params, error) {
++	v, err := getVFS(in)
++	if err != nil {
++		return nil, err
++	}
++	w := v.workspace
++	if w == nil {
++		return nil, errors.New("workspace requires a VFS disk cache")
++	}
++	op, err := in.GetString("op")
++	if err != nil {
++		return nil, err
++	}
++	if op == "settings" {
++		if _, ok := in["budget"]; ok {
++			budget, err := in.GetInt64("budget")
++			if err != nil {
++				return nil, err
++			}
++			if err = w.cache.WorkspaceBudget(budget); err != nil {
++				return nil, err
++			}
++		}
++		return rc.Params{"state": w.cache.WorkspaceState(), "cache": w.cache.Stats()}, nil
++	}
++	if op == "activity" {
++		return rc.Params{"items": w.activity()}, nil
++	}
++	if op == "cancel_all" {
++		return rc.Params{"accepted": true}, w.cancelDownloads(nil)
++	}
++	name, err := in.GetString("path")
++	if err != nil {
++		return nil, err
++	}
++	name, err = vfscache.WorkspacePath(name)
++	if err != nil {
++		return nil, err
++	}
++	if op == "status" {
++		return w.status(name)
++	}
++	if op == "cancel" {
++		return rc.Params{"accepted": true}, w.cancelDownloads(&name)
++	}
++	return rc.Params{"accepted": true}, w.request(op, name)
++}
++
++func (w *workspaceController) request(op, name string) error {
++	switch op {
++	case "pin", "warm", "cold", "auto", "inherit":
++	default:
++		return errors.New("unknown workspace operation")
++	}
++	if _, err := w.vfs.Stat(name); err != nil {
++		return err
++	}
++	w.mu.Lock()
++	err := w.cache.WorkspaceRequest(name, op)
++	if err != nil {
++		w.mu.Unlock()
++		return err
++	}
++	w.revision++
++	if w.cancel != nil {
++		w.cancel()
++	}
++	delete(w.errors, name)
++	w.mu.Unlock()
++	select {
++	case w.wake <- struct{}{}:
++	default:
++	}
++	return nil
++}
++
++func (w *workspaceController) files(name string, fn func(string, Node) error) error {
++	n, err := w.vfs.Stat(name)
++	if err != nil {
++		return err
++	}
++	if !n.IsDir() {
++		return fn(name, n)
++	}
++	d, ok := n.(*Dir)
++	if !ok {
++		return errors.New("invalid directory")
++	}
++	children, err := d.ReadDirAll()
++	if err != nil {
++		return err
++	}
++	for _, child := range children {
++		if err = w.files(child.Path(), fn); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func (w *workspaceController) status(name string) (rc.Params, error) {
++	return w.statusFor(name, false)
++}
++
++func (w *workspaceController) statusFor(name string, pinnedOnly bool) (rc.Params, error) {
++	n, err := w.vfs.Stat(name)
++	if err != nil {
++		return nil, err
++	}
++	var total, cached int64
++	var count, complete, dirty int
++	err = w.files(name, func(p string, node Node) error {
++		s := w.cache.WorkspaceStatus(p)
++		if pinnedOnly && !s.Pinned {
++			return nil
++		}
++		count++
++		total += node.Size()
++		cached += s.Cached
++		if s.Complete && s.Size == node.Size() {
++			complete++
++		}
++		if s.Dirty {
++			dirty++
++		}
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	availability := "cold"
++	if count == complete {
++		availability = "hot"
++	} else if complete > 0 {
++		availability = "mixed"
++	}
++	s := w.cache.WorkspaceState()
++	uploading, retries := w.cache.WorkspaceUploadState(name)
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	current := ""
++	if w.active == name && w.cancel != nil {
++		current = w.current
++	}
++	return rc.Params{"path": name, "directory": n.IsDir(), "availability": availability,
++		"pinned": w.cache.WorkspacePinned(name), "bytes": total, "cached": cached,
++		"files": count, "complete": complete, "pendingUploads": dirty, "uploading": uploading, "uploadRetries": retries,
++		"job": s.Jobs[name], "active": w.cancel != nil && w.active == name, "current": current, "error": w.errors[name]}, nil
++}
++
++func (w *workspaceController) activity() []rc.Params {
++	s := w.cache.WorkspaceState()
++	jobs := s.Jobs
++	for name, pin := range s.Pins {
++		if pin && jobs[name] == "" {
++			jobs[name] = "warm"
++		}
++	}
++	names := make([]string, 0, len(jobs))
++	for name := range jobs {
++		names = append(names, name)
++	}
++	sort.Strings(names)
++	rows := []rc.Params{}
++	for _, name := range names {
++		s, err := w.statusFor(name, jobs[name] != "cold" && w.cache.WorkspacePinned(name))
++		if err != nil {
++			s = rc.Params{"path": name, "error": err.Error(), "pinned": w.cache.WorkspacePinned(name)}
++		}
++		if jobs[name] != "cold" && s["availability"] == "hot" {
++			continue
++		}
++		s["kind"] = "download"
++		s["job"] = jobs[name]
++		s["canCancel"] = jobs[name] != "cold"
++		if jobs[name] == "cold" {
++			s["kind"] = "release"
++		}
++		rows = append(rows, s)
++	}
++	for _, name := range w.cache.WorkspacePendingUploads() {
++		s, err := w.status(name)
++		if err != nil {
++			s = rc.Params{"path": name, "error": err.Error()}
++		}
++		s["kind"] = "upload"
++		s["canCancel"] = false
++		rows = append(rows, s)
++	}
++	return rows
++}
++
++func (w *workspaceController) cancelDownloads(name *string) error {
++	names := []string{}
++	for _, row := range w.activity() {
++		p := row["path"].(string)
++		if row["canCancel"] == true && (name == nil || *name == p) {
++			names = append(names, p)
++		}
++	}
++	if len(names) == 0 {
++		return nil
++	}
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if err := w.cache.WorkspaceCancelDownloads(names); err != nil {
++		return err
++	}
++	w.revision++
++	if w.cancel != nil {
++		w.cancel()
++	}
++	for _, name := range names {
++		delete(w.errors, name)
++	}
++	select {
++	case w.wake <- struct{}{}:
++	default:
++	}
++	return nil
++}
++
++func (w *workspaceController) run(ctx context.Context) {
++	defer close(w.done)
++	w.recoverMoves()
++	tick := time.NewTicker(15 * time.Second)
++	defer tick.Stop()
++	for {
++		w.reconcile(ctx)
++		select {
++		case <-ctx.Done():
++			return
++		case <-tick.C:
++		case <-w.wake:
++		}
++	}
++}
++
++func (w *workspaceController) reconcile(ctx context.Context) {
++	w.mu.Lock()
++	s := w.cache.WorkspaceState()
++	revision := w.revision
++	w.mu.Unlock()
++	jobs := s.Jobs
++	for p, pin := range s.Pins {
++		if pin && jobs[p] == "" {
++			jobs[p] = "pin"
++		}
++	}
++	paths := make([]string, 0, len(jobs))
++	for p := range jobs {
++		paths = append(paths, p)
++	}
++	sort.Strings(paths)
++	for _, p := range paths {
++		if ctx.Err() != nil {
++			return
++		}
++		action := jobs[p]
++		jobCtx, cancel := context.WithCancel(ctx)
++		w.mu.Lock()
++		if w.revision != revision {
++			w.mu.Unlock()
++			cancel()
++			return
++		}
++		w.active = p
++		w.cancel = cancel
++		w.mu.Unlock()
++		err := w.files(p, func(name string, n Node) error {
++			if err := jobCtx.Err(); err != nil {
++				return err
++			}
++			w.mu.Lock()
++			w.current = name
++			w.mu.Unlock()
++			if action == "cold" {
++				if w.cache.WorkspacePinned(name) {
++					return nil
++				}
++				return w.cache.WorkspaceEvict(name)
++			}
++			if (action == "pin" || w.cache.WorkspacePinned(p)) && !w.cache.WorkspacePinned(name) {
++				return nil
++			}
++			return w.warm(jobCtx, name, n.Size())
++		})
++		cancel()
++		w.mu.Lock()
++		w.active = ""
++		w.current = ""
++		w.cancel = nil
++		if w.revision != revision || errors.Is(err, context.Canceled) {
++			delete(w.errors, p)
++		} else if err != nil {
++			w.errors[p] = err.Error()
++		} else {
++			delete(w.errors, p)
++			if action != "pin" {
++				err = w.cache.WorkspaceFinish(p, action)
++			}
++			if err != nil {
++				w.errors[p] = err.Error()
++			}
++		}
++		w.mu.Unlock()
++	}
++}
++
++func (w *workspaceController) warm(ctx context.Context, name string, size int64) error {
++	if s := w.cache.WorkspaceStatus(name); s.Complete && s.Size == size {
++		return nil
++	}
++	release := w.cache.WorkspaceLease(name)
++	defer release()
++	if err := w.cache.WorkspaceAdmit(name, size); err != nil {
++		return err
++	}
++	f, err := w.vfs.Open(name)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++	buf := make([]byte, 1024*1024)
++	for {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		_, err = f.Read(buf)
++		if errors.Is(err, io.EOF) {
++			break
++		}
++		if err != nil {
++			return err
++		}
++	}
++	if !w.cache.WorkspaceStatus(name).Complete {
++		return fmt.Errorf("file changed during download; retrying")
++	}
++	return nil
++}
++
++func (w *workspaceController) recoverMoves() {
++	for old, next := range w.cache.WorkspaceState().Moves {
++		_, oldErr := w.vfs.Stat(old)
++		_, nextErr := w.vfs.Stat(next)
++		var err error
++		if errors.Is(oldErr, os.ErrNotExist) && nextErr == nil {
++			err = w.cache.WorkspaceRename(old, next)
++		} else if oldErr == nil && errors.Is(nextErr, os.ErrNotExist) {
++			err = w.cache.WorkspaceAbortRename(old)
++		} else {
++			err = fmt.Errorf("interrupted rename from %s to %s needs inspection; both names remain protected", old, next)
++		}
++		if err != nil {
++			w.mu.Lock()
++			w.errors[old] = err.Error()
++			w.errors[next] = err.Error()
++			w.mu.Unlock()
++		}
++	}
++}
+diff --git a/vfs/workspace_test.go b/vfs/workspace_test.go
+new file mode 100644
+index 0000000..c6ec3b5
+--- /dev/null
++++ b/vfs/workspace_test.go
+@@ -0,0 +1,109 @@
++package vfs
++
++import (
++	"context"
++	"io"
++	"testing"
++	"time"
++
++	"github.com/rclone/rclone/fs"
++	"github.com/rclone/rclone/fs/config"
++	"github.com/rclone/rclone/vfs/vfscommon"
++	"github.com/stretchr/testify/require"
++)
++
++func TestWorkspaceWholeFileLifecycle(t *testing.T) {
++	old := config.GetCacheDir()
++	require.NoError(t, config.SetCacheDir(t.TempDir()))
++	t.Cleanup(func() { _ = config.SetCacheDir(old) })
++	opt := vfscommon.Opt
++	opt.CacheMode = vfscommon.CacheModeFull
++	opt.CachePollInterval = 0
++	opt.HandleCaching = 0
++	r, v := newTestVFSOpt(t, &opt)
++	r.WriteObject(context.Background(), "trip/a", "full file contents", t1)
++	require.NotNil(t, v.workspace)
++	w := v.workspace
++	require.NoError(t, w.cache.WorkspaceBudget(1024))
++	s, err := w.status("trip/a")
++	require.NoError(t, err)
++	require.Equal(t, "cold", s["availability"])
++	require.NoError(t, w.cache.WorkspaceRequest("trip", "pin"))
++	w.wake <- struct{}{}
++	require.Eventually(t, func() bool { return w.cache.WorkspaceStatus("trip/a").Complete }, 5*time.Second, 20*time.Millisecond)
++	f, err := v.Open("trip/a")
++	require.NoError(t, err)
++	b, err := io.ReadAll(f)
++	require.NoError(t, err)
++	require.NoError(t, f.Close())
++	require.Equal(t, "full file contents", string(b))
++	require.NoError(t, v.Rename("trip", "journey"))
++	require.True(t, w.cache.WorkspacePinned("journey/a"))
++	// Recreate the disk cache and worker as happens at service startup.
++	v.SetCacheMode(vfscommon.CacheModeFull)
++	w = v.workspace
++	require.True(t, w.cache.WorkspacePinned("journey/a"))
++	require.True(t, w.cache.WorkspaceStatus("journey/a").Complete)
++	require.NoError(t, w.cache.WorkspaceRequest("journey", "cold"))
++	w.wake <- struct{}{}
++	require.Eventually(t, func() bool { return !w.cache.WorkspaceStatus("journey/a").Complete }, 5*time.Second, 20*time.Millisecond)
++	obj, err := r.Fremote.NewObject(context.Background(), "journey/a")
++	require.NoError(t, err)
++	reader, err := obj.Open(context.Background())
++	require.NoError(t, err)
++	b, err = io.ReadAll(reader)
++	require.NoError(t, err)
++	require.NoError(t, reader.Close())
++	require.Equal(t, "full file contents", string(b))
++	require.NoError(t, w.cache.WorkspaceDelete("journey"))
++}
++
++func TestWorkspaceActivityAndCancellation(t *testing.T) {
++	old := config.GetCacheDir()
++	require.NoError(t, config.SetCacheDir(t.TempDir()))
++	t.Cleanup(func() { _ = config.SetCacheDir(old) })
++	opt := vfscommon.Opt
++	opt.CacheMode = vfscommon.CacheModeFull
++	opt.CachePollInterval = 0
++	opt.HandleCaching = 0
++	opt.WriteBack = fs.Duration(time.Hour)
++	r, v := newTestVFSOpt(t, &opt)
++	for _, name := range []string{"ready", "pending/a", "pending/b", "excluded"} {
++		r.WriteObject(context.Background(), name, "contents", t1)
++	}
++	w := v.workspace
++	f, err := v.Open("ready")
++	require.NoError(t, err)
++	_, err = io.ReadAll(f)
++	require.NoError(t, err)
++	require.NoError(t, f.Close())
++	require.NoError(t, w.cache.WorkspaceRequest("ready", "pin"))
++	require.NoError(t, w.cache.WorkspaceBudget(1))
++	require.NoError(t, w.request("pin", "pending"))
++	require.NoError(t, w.request("warm", "excluded"))
++	upload, err := v.Create("upload")
++	require.NoError(t, err)
++	_, err = upload.Write([]byte("unsaved upload"))
++	require.NoError(t, err)
++	require.NoError(t, upload.Close())
++
++	rows := w.activity()
++	paths := map[string]string{}
++	for _, row := range rows {
++		paths[row["path"].(string)] = row["kind"].(string)
++	}
++	require.Equal(t, map[string]string{"pending": "download", "excluded": "download", "upload": "upload"}, paths)
++	require.NoError(t, w.cancelDownloads(nil))
++	require.True(t, w.cache.WorkspacePinned("ready"), "cancel all must preserve completed pins")
++	require.False(t, w.cache.WorkspacePinned("pending/a"))
++	require.NotContains(t, w.cache.WorkspaceState().Jobs, "pending")
++	require.NotContains(t, w.cache.WorkspaceState().Jobs, "excluded")
++	require.True(t, w.cache.WorkspaceStatus("upload").Dirty, "cancellation must preserve pending uploads")
++	// A stale cancel click on a completed file is harmless.
++	name := "ready"
++	require.NoError(t, w.cancelDownloads(&name))
++	require.True(t, w.cache.WorkspacePinned("ready"))
++	v.SetCacheMode(vfscommon.CacheModeFull)
++	require.False(t, v.cache.WorkspacePinned("pending/a"))
++	require.NotContains(t, v.cache.WorkspaceState().Jobs, "excluded")
++}

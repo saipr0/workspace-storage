@@ -1,0 +1,26 @@
+.workspace-status { display: inline-flex; align-items: center; justify-content: center; gap: 3px; padding: 6px !important; min-width: 36px; min-height: 36px !important; border: none !important; background: transparent !important; color: var(--color-main-text); }
+.workspace-status svg { width: 22px; height: 22px; flex: none; }
+.workspace-dialog { width: min(480px, calc(100vw - 32px)); padding: 28px; border: 1px solid var(--color-border); border-radius: var(--border-radius-large, 16px); background: var(--color-main-background); color: var(--color-main-text); box-shadow: 0 12px 48px #0004; }
+.workspace-dialog::backdrop { background: #0007; }
+.workspace-dialog [hidden], .workspace-activity [hidden] { display: none !important; }
+.workspace-dialog h2 { margin: 0 0 20px; font-size: 22px; overflow-wrap: anywhere; }
+.workspace-dialog-content p { margin: 12px 0; }
+.workspace-dialog-content progress { width: 100%; height: 12px; accent-color: var(--color-primary-element); }
+.workspace-dialog-content label { display: grid; gap: 12px; }
+.workspace-dialog-content input { width: 100%; }
+.workspace-detail { color: var(--color-text-maxcontrast); line-height: 1.55; font-size: 13px; overflow-wrap: anywhere; }
+.workspace-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 24px; }
+.workspace-spin { display: inline-flex; animation: workspace-spin 1s linear infinite; }
+@keyframes workspace-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-spin { animation: none; } }
+.workspace-activity { width: min(960px, 100%); margin: 0 auto; padding: 24px; text-align: left; box-sizing: border-box; }
+.workspace-activity h2 { font-size: 24px; font-weight: 600; margin: 0 0 8px; }
+.workspace-activity > p { margin: 8px 0 16px; }
+.workspace-transfers { margin-top: 20px; }
+.workspace-transfer { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 18px 0; border-top: 1px solid var(--color-border); }
+.workspace-transfer > .workspace-status { flex-wrap: wrap; max-width: 64px; box-sizing: border-box; }
+.workspace-transfer strong, .workspace-transfer p { overflow-wrap: anywhere; }
+.workspace-transfer p { margin: 4px 0; }
+.workspace-transfer progress { width: 100%; height: 6px; accent-color: var(--color-primary-element); }
+.workspace-transfer button { align-self: center; }
+@media (max-width: 600px) { .workspace-activity { padding: 16px; } .workspace-transfer { grid-template-columns: 40px minmax(0, 1fr); gap: 10px; } .workspace-transfer button { grid-column: 2; justify-self: start; } }

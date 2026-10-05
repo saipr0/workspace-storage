@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+  <id>workspace_storage</id>
+  <name>Workspace storage</name>
+  <summary>Local availability and encrypted cloud storage controls</summary>
+  <description>Keep selected workspace files locally, release synced local copies, and monitor transfers.</description>
+  <version>0.1.0</version>
+  <licence>agpl</licence>
+  <author>Sai</author>
+  <namespace>WorkspaceStorage</namespace>
+  <category>files</category>
+  <dependencies><nextcloud min-version="34" max-version="34"/></dependencies>
+</info>
