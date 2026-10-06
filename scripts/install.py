@@ -65,7 +65,7 @@ previous = dropin.read_bytes() if dropin.exists() else None
 dropin.write_text('''[Service]
 EnvironmentFile=/usr/local/lib/workspace-storage/service.env
 ExecStart=
-ExecStart=/usr/local/lib/workspace-storage/rclone serve webdav workspace: --config=/home/saipr/.config/rclone/rclone.conf --addr=127.0.0.1:8686 --htpasswd=/home/saipr/.config/workspace-storage/webdav.htpasswd --vfs-cache-mode=full --cache-dir=/home/saipr/.cache/workspace-storage --vfs-cache-max-size=2G --vfs-cache-min-free-space=10G --vfs-cache-max-age=24h --log-level=INFO --rc --rc-addr=127.0.0.1:8687
+ExecStart=/usr/local/lib/workspace-storage/rclone serve webdav workspace: --config=/home/saipr/.config/rclone/rclone.conf --addr=127.0.0.1:8686 --htpasswd=/home/saipr/.config/workspace-storage/webdav.htpasswd --vfs-cache-mode=full --cache-dir=/home/saipr/.cache/workspace-storage --vfs-cache-max-size=320G --vfs-cache-min-free-space=30G --vfs-cache-max-age=24h --log-level=INFO --rc --rc-addr=127.0.0.1:8687
 ''')
 try:
     run('systemctl', 'daemon-reload')
@@ -73,8 +73,8 @@ try:
     authorization = 'Basic ' + base64.b64encode(('workspace:' + password).encode()).decode()
     for attempt in range(20):
         try:
-            req = urllib.request.Request('http://127.0.0.1:8687/workspace/control',
-                data=b'{"op":"settings","fs":"workspace:"}',
+            req = urllib.request.Request('http://127.0.0.1:8687/vfs/status',
+                data=b'{"path":"","fs":"workspace:"}',
                 headers={'Authorization': authorization, 'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=5) as response: json.load(response)
             break

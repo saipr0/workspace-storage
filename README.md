@@ -66,8 +66,9 @@ bash scripts/build.sh
 ```
 
 The script fetches the exact upstream revision, checks/applies the patch, runs
-upstream VFS/cache tests and the workspace race tests, then builds the Linux amd64
-binary and Nextcloud app. Re-running it reuses the same patched source tree.
+VFS/cache tests with race detection and the app regression tests, then builds the
+Linux amd64 binary and Nextcloud app. Each patch revision gets its own cached
+source tree, so rebuilding does not reuse an older implementation.
 Build products and checksums are in `dist/`.
 
 Run the integration test on Linux as an ordinary user:

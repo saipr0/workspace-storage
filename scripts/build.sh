@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 project_dir=$(cd "$(dirname "$0")/.." && pwd)
-source_dir="$project_dir/.build/rclone"
+source_dir="$project_dir/.build/rclone-$(git hash-object "$project_dir/rclone/workspace.patch")"
 mkdir -p "$project_dir/.build" "$project_dir/dist"
 if [[ ! -d "$source_dir/.git" ]]; then
   git clone --depth 1 --branch v1.75.1 https://github.com/rclone/rclone.git "$source_dir"
@@ -12,11 +12,11 @@ if ! git -C "$source_dir" apply --reverse --check "$project_dir/rclone/workspace
   git -C "$source_dir" apply "$project_dir/rclone/workspace.patch"
 fi
 cd "$source_dir"
-go test ./vfs/vfscache ./vfs
-go test -race ./vfs/vfscache ./vfs -run '^TestWorkspace'
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '-X github.com/rclone/rclone/fs.Version=v1.75.1-workspace.2' -o "$project_dir/dist/rclone-workspace" .
+go test -race ./vfs/vfscache ./vfs
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '-X github.com/rclone/rclone/fs.Version=v1.75.1-workspace.3' -o "$project_dir/dist/rclone-workspace" .
 cd "$project_dir"
 npm ci --ignore-scripts
+npm test
 npm run build
 tar -czf dist/workspace_storage.tar.gz -C nextcloud workspace_storage
 cp scripts/install.py dist/install.py

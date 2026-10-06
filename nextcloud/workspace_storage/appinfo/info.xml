@@ -3,7 +3,7 @@
   <id>workspace_storage</id>
   <name>Workspace storage</name>
   <summary>Local availability and encrypted cloud storage controls</summary>
-  <description>Keep selected workspace files locally, release synced local copies, and monitor transfers.</description>
+  <description>Keep selected workspace files on this server, release local copies, and see what is stored locally.</description>
   <version>0.1.0</version>
   <licence>agpl</licence>
   <author>Sai</author>

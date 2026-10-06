@@ -2,6 +2,7 @@
   "name": "workspace-storage",
   "private": true,
   "scripts": {
+    "test": "node --test tests/workspace.test.cjs",
     "build": "esbuild nextcloud/workspace_storage/src/workspace.js --bundle --format=iife --target=es2022 --outfile=nextcloud/workspace_storage/js/workspace.js"
   },
   "dependencies": {
